@@ -524,4 +524,34 @@ mod tests {
         assert!(result.contains("<channel>"));
         assert!(result.contains("</channel>"));
     }
+
+    #[tokio::test]
+    async fn test_exclude_patterns_filter_items() {
+        let success_url = start_ok_server().await;
+        // Use a fail server for excluded item - if download is attempted, test would fail
+        let fail_url = start_fail_server(StatusCode::INTERNAL_SERVER_ERROR).await;
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let state = AppState {
+            download_path: temp_dir.path().to_path_buf(),
+            base_url: "http://localhost:4000/downloaded".to_string(),
+            client: test_client(),
+        };
+
+        let rss = make_rss(&[
+            ("keep-item", &format!("{success_url}/keep.torrent")),
+            ("exclude-me", &format!("{fail_url}/exclude.torrent")),
+        ]);
+
+        // Exclude items with "exclude-me" in the title
+        let exclude_patterns = vec!["exclude-me".to_string()];
+        let result = process_rss(&rss, &state, &exclude_patterns).await.unwrap();
+
+        // Kept item should be present
+        assert!(result.contains("keep-item"));
+        assert!(result.contains("http://localhost:4000/downloaded/keep-item.torrent"));
+
+        // Excluded item should not be present (and no download attempted)
+        assert!(!result.contains("exclude-me"));
+    }
 }
