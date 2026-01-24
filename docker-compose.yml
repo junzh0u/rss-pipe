@@ -2,7 +2,11 @@ services:
   rss-pipe:
     build: .
     ports:
-      - "4000:4000"
+      - "${PORT:-4000}:${PORT:-4000}"
     volumes:
       - ./downloaded:/app/downloaded
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        exec rss-pipe -d /app/downloaded -p ${PORT:-4000} -r ${RETENTION_DAYS:-30} ${BASE_URL:+-b "$BASE_URL"}
     restart: unless-stopped
