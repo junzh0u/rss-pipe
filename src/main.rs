@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tower_http::services::ServeDir;
 
 #[derive(Parser)]
-#[command(name = "rss_pipe")]
+#[command(name = "rss-pipe")]
 #[command(about = "A proxy server that downloads torrent enclosures from RSS feeds")]
 struct Args {
     #[arg(short, long, default_value_t = 4000)]
