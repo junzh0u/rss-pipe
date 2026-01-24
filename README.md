@@ -8,7 +8,7 @@ A proxy server that downloads torrent enclosures from RSS feeds and rewrites the
 - Rewrites enclosure URLs to point to locally served files
 - Skips already downloaded torrents (uses GUID as filename)
 - Removes items from feed when download fails
-- Supports exclude patterns to filter out unwanted items
+- Supports exclude patterns to filter out unwanted items (skips download entirely)
 - Serves downloaded files via built-in static file server
 - Automatically cleans up old files on startup
 
@@ -84,10 +84,11 @@ Serves downloaded torrent files as static content.
 
 1. Fetches the RSS feed from the `origin` URL
 2. Parses each `<item>` element looking for `<enclosure>` tags
-3. Downloads the enclosure URL to `<download-path>/<guid>.torrent`
-4. Rewrites the enclosure URL to `<base-url>/<guid>.torrent`
-5. Removes items where download failed or title matches exclude patterns
-6. Returns the modified RSS feed
+3. Skips items whose title matches an exclude pattern (no download attempted)
+4. Downloads the enclosure URL to `<download-path>/<guid>.torrent`
+5. Rewrites the enclosure URL to `<base-url>/<guid>.torrent`
+6. Removes items where download failed
+7. Returns the modified RSS feed
 
 ## Development
 
