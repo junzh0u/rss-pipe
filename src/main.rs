@@ -78,7 +78,7 @@ async fn pipe_handler(
 
     // Try to get origin content from cache, or fetch and cache it
     let body = if let Some(cached) = state.origin_cache.get(&query.origin).await {
-        println!("Cache hit: {}", query.origin);
+        println!("From cache: {}", query.origin);
         cached
     } else {
         match state.client.get(&query.origin).send().await {
@@ -92,7 +92,7 @@ async fn pipe_handler(
 
                 match response.text().await {
                     Ok(body) => {
-                        println!("Cached: {}", query.origin);
+                        println!("Fetched: {}", query.origin);
                         state
                             .origin_cache
                             .insert(query.origin.clone(), body.clone())
@@ -214,7 +214,6 @@ async fn process_rss(
                             // Download the torrent if it doesn't already exist
                             let torrent_path = state.download_path.join(format!("{guid}.torrent"));
                             if torrent_path.exists() {
-                                println!("Existing: {guid}");
                                 existing_count += 1;
                             } else {
                                 match download_file(&state.client, &decoded_url, &torrent_path)
