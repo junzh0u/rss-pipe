@@ -116,10 +116,12 @@ async fn process_rss(xml: &str, state: &AppState) -> Result<String, Box<dyn std:
                             let original_url = &caps[1];
                             let decoded_url = quick_xml::escape::unescape(original_url)?;
 
-                            // Download the torrent
+                            // Download the torrent if it doesn't already exist
                             let torrent_path = state.download_path.join(format!("{}.torrent", guid));
-                            if let Err(err) = download_file(&state.client, &decoded_url, &torrent_path).await {
-                                eprintln!("Failed to download {}: {}", decoded_url, err);
+                            if !torrent_path.exists() {
+                                if let Err(err) = download_file(&state.client, &decoded_url, &torrent_path).await {
+                                    eprintln!("Failed to download {}: {}", decoded_url, err);
+                                }
                             }
 
                             // Build new enclosure with replaced URL
