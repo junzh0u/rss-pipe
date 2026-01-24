@@ -332,19 +332,38 @@ async fn main() {
         .await
         .expect("Failed to create download directory");
 
-    let base_url = args
-        .base_url
-        .unwrap_or_else(|| format!("http://localhost:{}/downloaded", args.port));
+    // Canonicalize paths to resolve symlinks and relative paths
+    let cwd = std::env::current_dir()
+        .expect("Failed to get current working directory")
+        .canonicalize()
+        .expect("Failed to canonicalize current working directory");
+
+    let download_path = args
+        .download_path
+        .canonicalize()
+        .expect("Failed to canonicalize download path");
+
+    // Enforce that download_path is under current working directory
+    let relative_path = download_path
+        .strip_prefix(&cwd)
+        .expect("Download path must be under current working directory");
+
+    let serve_path = format!("/{}", relative_path.display());
+
+    let base_url = args.base_url.map_or_else(
+        || format!("http://localhost:{}{serve_path}", args.port),
+        |url| format!("{}{serve_path}", url.trim_end_matches('/')),
+    );
 
     let state = Arc::new(AppState {
-        download_path: args.download_path.clone(),
+        download_path,
         base_url,
         client: reqwest::Client::new(),
     });
 
     let app = Router::new()
         .route("/pipe", get(pipe_handler))
-        .nest_service("/downloaded", ServeDir::new(&args.download_path))
+        .nest_service(&serve_path, ServeDir::new(&state.download_path))
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], args.port));
