@@ -84,12 +84,16 @@ async fn pipe_handler(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn process_rss(xml: &str, state: &AppState) -> Result<String, Box<dyn std::error::Error>> {
     let mut reader = Reader::from_str(xml);
     let mut writer = Writer::new(Cursor::new(Vec::new()));
 
     let mut current_guid: Option<String> = None;
     let mut in_guid = false;
+    let mut in_item = false;
+    let mut item_buffer: Vec<Event<'static>> = Vec::new();
+    let mut item_failed = false;
 
     let url_regex = Regex::new(r#"url="([^"]*)""#)?;
 
@@ -100,17 +104,28 @@ async fn process_rss(xml: &str, state: &AppState) -> Result<String, Box<dyn std:
                 let name = e.name();
                 let name_str = std::str::from_utf8(name.as_ref())?;
 
+                if name_str == "item" {
+                    in_item = true;
+                    item_buffer.clear();
+                    item_failed = false;
+                    current_guid = None;
+                }
+
                 if name_str == "guid" {
                     in_guid = true;
                 }
 
-                writer.write_event(Event::Start(e.clone()))?;
+                if in_item {
+                    item_buffer.push(Event::Start(e.into_owned()));
+                } else {
+                    writer.write_event(Event::Start(e.clone()))?;
+                }
             }
             Ok(Event::Empty(e)) => {
                 let name = e.name();
                 let name_str = std::str::from_utf8(name.as_ref())?;
 
-                if name_str == "enclosure" {
+                if name_str == "enclosure" && in_item {
                     if let Some(ref guid) = current_guid {
                         let elem_str = String::from_utf8(e.to_vec())?;
 
@@ -125,6 +140,8 @@ async fn process_rss(xml: &str, state: &AppState) -> Result<String, Box<dyn std:
                                     download_file(&state.client, &decoded_url, &torrent_path).await
                                 {
                                     eprintln!("Failed to download {decoded_url}: {err}");
+                                    item_failed = true;
+                                    continue;
                                 }
                             }
 
@@ -145,13 +162,23 @@ async fn process_rss(xml: &str, state: &AppState) -> Result<String, Box<dyn std:
                                 }
                             }
 
-                            writer.write_event(Event::Empty(new_elem))?;
-                            continue;
+                            item_buffer.push(Event::Empty(new_elem.into_owned()));
+                        } else {
+                            // URL regex didn't match - mark item as failed
+                            item_failed = true;
                         }
+                    } else {
+                        // No guid available - mark item as failed
+                        item_failed = true;
                     }
+                    continue;
                 }
 
-                writer.write_event(Event::Empty(e))?;
+                if in_item {
+                    item_buffer.push(Event::Empty(e.into_owned()));
+                } else {
+                    writer.write_event(Event::Empty(e))?;
+                }
             }
             Ok(Event::End(e)) => {
                 let name = e.name();
@@ -159,21 +186,47 @@ async fn process_rss(xml: &str, state: &AppState) -> Result<String, Box<dyn std:
 
                 if name_str == "guid" {
                     in_guid = false;
-                } else if name_str == "item" {
-                    current_guid = None;
                 }
 
-                writer.write_event(Event::End(e))?;
+                if name_str == "item" {
+                    item_buffer.push(Event::End(e.into_owned()));
+
+                    // Only write the item if download succeeded
+                    if item_failed {
+                        eprintln!(
+                            "Skipping item with guid {current_guid:?} due to download failure"
+                        );
+                    } else {
+                        for event in item_buffer.drain(..) {
+                            writer.write_event(event)?;
+                        }
+                    }
+
+                    in_item = false;
+                    current_guid = None;
+                } else if in_item {
+                    item_buffer.push(Event::End(e.into_owned()));
+                } else {
+                    writer.write_event(Event::End(e))?;
+                }
             }
             Ok(Event::Text(e)) => {
                 if in_guid {
                     let text = e.unescape()?;
                     current_guid = Some(text.to_string());
                 }
-                writer.write_event(Event::Text(e))?;
+                if in_item {
+                    item_buffer.push(Event::Text(e.into_owned()));
+                } else {
+                    writer.write_event(Event::Text(e))?;
+                }
             }
             Ok(e) => {
-                writer.write_event(e)?;
+                if in_item {
+                    item_buffer.push(e.into_owned());
+                } else {
+                    writer.write_event(e)?;
+                }
             }
             Err(e) => return Err(format!("XML parse error: {e}").into()),
         }
