@@ -65,20 +65,22 @@ async fn pipe_handler(
                         .into_response(),
                     Err(e) => (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Failed to process RSS: {}", e),
+                        format!("Failed to process RSS: {e}"),
                     )
                         .into_response(),
                 },
                 Err(e) => (
                     StatusCode::BAD_GATEWAY,
-                    format!("Failed to read response body: {}", e),
+                    format!("Failed to read response body: {e}"),
                 )
                     .into_response(),
             }
         }
-        Err(e) => {
-            (StatusCode::BAD_GATEWAY, format!("Failed to fetch origin: {}", e)).into_response()
-        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            format!("Failed to fetch origin: {e}"),
+        )
+            .into_response(),
     }
 }
 
@@ -117,15 +119,21 @@ async fn process_rss(xml: &str, state: &AppState) -> Result<String, Box<dyn std:
                             let decoded_url = quick_xml::escape::unescape(original_url)?;
 
                             // Download the torrent if it doesn't already exist
-                            let torrent_path = state.download_path.join(format!("{}.torrent", guid));
+                            let torrent_path = state.download_path.join(format!("{guid}.torrent"));
                             if !torrent_path.exists() {
-                                if let Err(err) = download_file(&state.client, &decoded_url, &torrent_path).await {
-                                    eprintln!("Failed to download {}: {}", decoded_url, err);
+                                if let Err(err) =
+                                    download_file(&state.client, &decoded_url, &torrent_path).await
+                                {
+                                    eprintln!("Failed to download {decoded_url}: {err}");
                                 }
                             }
 
                             // Build new enclosure with replaced URL
-                            let new_url = format!("{}/{}.torrent", state.base_url.trim_end_matches('/'), guid);
+                            let new_url = format!(
+                                "{}/{}.torrent",
+                                state.base_url.trim_end_matches('/'),
+                                guid
+                            );
                             let mut new_elem = BytesStart::new("enclosure");
 
                             for attr in e.attributes().flatten() {
@@ -167,7 +175,7 @@ async fn process_rss(xml: &str, state: &AppState) -> Result<String, Box<dyn std:
             Ok(e) => {
                 writer.write_event(e)?;
             }
-            Err(e) => return Err(format!("XML parse error: {}", e).into()),
+            Err(e) => return Err(format!("XML parse error: {e}").into()),
         }
     }
 
@@ -201,9 +209,9 @@ async fn main() {
         .await
         .expect("Failed to create download directory");
 
-    let base_url = args.base_url.unwrap_or_else(|| {
-        format!("http://localhost:{}/downloaded", args.port)
-    });
+    let base_url = args
+        .base_url
+        .unwrap_or_else(|| format!("http://localhost:{}/downloaded", args.port));
 
     let state = Arc::new(AppState {
         download_path: args.download_path.clone(),
@@ -217,7 +225,7 @@ async fn main() {
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], args.port));
-    println!("Listening on http://{}", addr);
+    println!("Listening on http://{addr}");
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
