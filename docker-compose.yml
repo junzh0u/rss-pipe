@@ -1,0 +1,8 @@
+services:
+  rss-pipe:
+    build: .
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./downloaded:/app/downloaded
+    restart: unless-stopped
