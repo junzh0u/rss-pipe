@@ -283,3 +283,175 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_rss(items: &[(&str, &str)]) -> String {
+        let items_xml: String = items
+            .iter()
+            .map(|(guid, enclosure_url)| {
+                format!(
+                    r#"<item><guid isPermaLink="false">{guid}</guid><title>Test Item {guid}</title><enclosure length="1000" type="application/x-bittorrent" url="{enclosure_url}"/></item>"#
+                )
+            })
+            .collect();
+
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>Test Feed</title>{items_xml}</channel></rss>"#
+        )
+    }
+
+    async fn start_ok_server() -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}");
+
+        tokio::spawn(async move {
+            loop {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    tokio::spawn(async move {
+                        let mut buf = [0u8; 4096];
+                        let _ = socket.read(&mut buf).await;
+                        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\ntorrent data";
+                        let _ = socket.write_all(response).await;
+                        let _ = socket.flush().await;
+                    });
+                }
+            }
+        });
+
+        // Give the server time to start
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        url
+    }
+
+    async fn start_fail_server(status: StatusCode) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}");
+
+        let status_line = match status {
+            StatusCode::INTERNAL_SERVER_ERROR => "HTTP/1.1 500 Internal Server Error",
+            StatusCode::NOT_FOUND => "HTTP/1.1 404 Not Found",
+            StatusCode::SERVICE_UNAVAILABLE => "HTTP/1.1 503 Service Unavailable",
+            _ => "HTTP/1.1 500 Internal Server Error",
+        };
+
+        tokio::spawn(async move {
+            loop {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let response = format!(
+                        "{status_line}\r\nContent-Length: 5\r\nConnection: close\r\n\r\nerror"
+                    );
+                    tokio::spawn(async move {
+                        let mut buf = [0u8; 4096];
+                        let _ = socket.read(&mut buf).await;
+                        let _ = socket.write_all(response.as_bytes()).await;
+                        let _ = socket.flush().await;
+                    });
+                }
+            }
+        });
+
+        // Give the server time to start
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        url
+    }
+
+    fn test_client() -> reqwest::Client {
+        reqwest::Client::builder().no_proxy().build().unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_failed_download_removes_item() {
+        let success_url = start_ok_server().await;
+        let fail_url = start_fail_server(StatusCode::INTERNAL_SERVER_ERROR).await;
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let state = AppState {
+            download_path: temp_dir.path().to_path_buf(),
+            base_url: "http://localhost:4000/downloaded".to_string(),
+            client: test_client(),
+        };
+
+        let rss = make_rss(&[
+            ("item-success", &format!("{success_url}/success.torrent")),
+            ("item-fail", &format!("{fail_url}/fail.torrent")),
+        ]);
+
+        let result = process_rss(&rss, &state).await.unwrap();
+
+        // Successful item should be present
+        assert!(
+            result.contains("item-success"),
+            "Expected successful item to be present"
+        );
+        assert!(result.contains("http://localhost:4000/downloaded/item-success.torrent"));
+
+        // Failed item should be removed
+        assert!(
+            !result.contains("item-fail"),
+            "Expected failed item to be removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_existing_torrent_not_redownloaded() {
+        // Server would fail if called, but file exists so it shouldn't be called
+        let fail_url = start_fail_server(StatusCode::INTERNAL_SERVER_ERROR).await;
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Create an existing torrent file
+        let existing_path = temp_dir.path().join("existing-item.torrent");
+        tokio::fs::write(&existing_path, b"existing torrent")
+            .await
+            .unwrap();
+
+        let state = AppState {
+            download_path: temp_dir.path().to_path_buf(),
+            base_url: "http://localhost:4000/downloaded".to_string(),
+            client: test_client(),
+        };
+
+        let rss = make_rss(&[("existing-item", &format!("{fail_url}/existing.torrent"))]);
+
+        let result = process_rss(&rss, &state).await.unwrap();
+
+        // Item should be present since file already existed
+        assert!(result.contains("existing-item"));
+        assert!(result.contains("http://localhost:4000/downloaded/existing-item.torrent"));
+    }
+
+    #[tokio::test]
+    async fn test_all_items_fail_produces_empty_channel() {
+        let fail_url1 = start_fail_server(StatusCode::NOT_FOUND).await;
+        let fail_url2 = start_fail_server(StatusCode::SERVICE_UNAVAILABLE).await;
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let state = AppState {
+            download_path: temp_dir.path().to_path_buf(),
+            base_url: "http://localhost:4000/downloaded".to_string(),
+            client: test_client(),
+        };
+
+        let rss = make_rss(&[
+            ("fail-item-1", &format!("{fail_url1}/fail1.torrent")),
+            ("fail-item-2", &format!("{fail_url2}/fail2.torrent")),
+        ]);
+
+        let result = process_rss(&rss, &state).await.unwrap();
+
+        // No items should be present
+        assert!(!result.contains("fail-item-1"));
+        assert!(!result.contains("fail-item-2"));
+        // But the channel structure should remain
+        assert!(result.contains("<channel>"));
+        assert!(result.contains("</channel>"));
+    }
+}
