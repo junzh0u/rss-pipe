@@ -635,4 +635,81 @@ mod tests {
         // Excluded item should not be present (and no download attempted)
         assert!(!result.contains("exclude-me"));
     }
+
+    #[tokio::test]
+    async fn test_cleanup_removes_old_files() {
+        use filetime::{set_file_mtime, FileTime};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let old_file = temp_dir.path().join("old.torrent");
+        let new_file = temp_dir.path().join("new.torrent");
+
+        // Create both files
+        tokio::fs::write(&old_file, b"old content").await.unwrap();
+        tokio::fs::write(&new_file, b"new content").await.unwrap();
+
+        // Set old file's mtime to 31 days ago
+        let old_time = std::time::SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(31 * 24 * 60 * 60))
+            .unwrap();
+        set_file_mtime(&old_file, FileTime::from_system_time(old_time)).unwrap();
+
+        // Run cleanup with 30 day retention
+        cleanup_old_files(&temp_dir.path().to_path_buf(), 30).await;
+
+        // Old file should be removed, new file should remain
+        assert!(!old_file.exists(), "Old file should be removed");
+        assert!(new_file.exists(), "New file should remain");
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_keeps_files_within_retention() {
+        use filetime::{set_file_mtime, FileTime};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_25_days = temp_dir.path().join("file_25_days.torrent");
+        let file_29_days = temp_dir.path().join("file_29_days.torrent");
+
+        // Create files
+        tokio::fs::write(&file_25_days, b"content").await.unwrap();
+        tokio::fs::write(&file_29_days, b"content").await.unwrap();
+
+        // Set file times (well within retention period)
+        let time_25_days = std::time::SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(25 * 24 * 60 * 60))
+            .unwrap();
+        let time_29_days = std::time::SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(29 * 24 * 60 * 60))
+            .unwrap();
+        set_file_mtime(&file_25_days, FileTime::from_system_time(time_25_days)).unwrap();
+        set_file_mtime(&file_29_days, FileTime::from_system_time(time_29_days)).unwrap();
+
+        // Run cleanup with 30 day retention
+        cleanup_old_files(&temp_dir.path().to_path_buf(), 30).await;
+
+        // Both files should remain (within 30 day retention)
+        assert!(file_25_days.exists(), "25-day old file should remain");
+        assert!(file_29_days.exists(), "29-day old file should remain");
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_ignores_directories() {
+        use filetime::{set_file_mtime, FileTime};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let subdir = temp_dir.path().join("subdir");
+        tokio::fs::create_dir(&subdir).await.unwrap();
+
+        // Set directory mtime to old (should be ignored)
+        let old_time = std::time::SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(31 * 24 * 60 * 60))
+            .unwrap();
+        set_file_mtime(&subdir, FileTime::from_system_time(old_time)).unwrap();
+
+        // Run cleanup
+        cleanup_old_files(&temp_dir.path().to_path_buf(), 30).await;
+
+        // Directory should still exist
+        assert!(subdir.exists(), "Directory should not be removed");
+    }
 }
