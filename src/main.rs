@@ -163,6 +163,20 @@ async fn process_rss(
                 let name_str = std::str::from_utf8(name.as_ref())?;
 
                 if name_str == "enclosure" && in_item {
+                    // Check if title matches any exclude pattern before downloading
+                    let excluded = current_title.as_ref().is_some_and(|title| {
+                        exclude_patterns
+                            .iter()
+                            .any(|pattern| title.contains(pattern))
+                    });
+
+                    if excluded {
+                        println!("Excluded: {}", current_guid.as_deref().unwrap_or("unknown"));
+                        excluded_count += 1;
+                        item_failed = true;
+                        continue;
+                    }
+
                     if let Some(ref guid) = current_guid {
                         let elem_str = String::from_utf8(e.to_vec())?;
 
@@ -242,17 +256,8 @@ async fn process_rss(
                 if name_str == "item" {
                     item_buffer.push(Event::End(e.into_owned()));
 
-                    // Check if title matches any exclude pattern
-                    let excluded = current_title.as_ref().is_some_and(|title| {
-                        exclude_patterns
-                            .iter()
-                            .any(|pattern| title.contains(pattern))
-                    });
-
-                    if excluded {
-                        println!("Excluded: {}", current_guid.as_deref().unwrap_or("unknown"));
-                        excluded_count += 1;
-                    } else if !item_failed {
+                    // Only write the item if not failed/excluded
+                    if !item_failed {
                         for event in item_buffer.drain(..) {
                             writer.write_event(event)?;
                         }
