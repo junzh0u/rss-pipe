@@ -28,6 +28,9 @@ struct Args {
 
     #[arg(short, long)]
     base_url: Option<String>,
+
+    #[arg(short, long, default_value_t = 30)]
+    retention_days: u64,
 }
 
 #[derive(Clone)]
@@ -323,6 +326,50 @@ async fn download_file(
     Ok(())
 }
 
+async fn cleanup_old_files(dir: &PathBuf, retention_days: u64) {
+    let max_age = std::time::Duration::from_secs(retention_days * 24 * 60 * 60);
+    let now = std::time::SystemTime::now();
+
+    let mut entries = match tokio::fs::read_dir(dir).await {
+        Ok(entries) => entries,
+        Err(e) => {
+            eprintln!("Failed to read download directory for cleanup: {e}");
+            return;
+        }
+    };
+
+    let mut removed_count = 0u32;
+
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let Ok(metadata) = tokio::fs::metadata(&path).await else {
+            continue;
+        };
+
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+
+        if let Ok(age) = now.duration_since(modified) {
+            if age > max_age {
+                if let Err(e) = tokio::fs::remove_file(&path).await {
+                    eprintln!("Failed to remove old file {}: {e}", path.display());
+                } else {
+                    removed_count += 1;
+                }
+            }
+        }
+    }
+
+    if removed_count > 0 {
+        println!("Cleanup: removed {removed_count} files older than {retention_days} days");
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
@@ -342,6 +389,9 @@ async fn main() {
         .download_path
         .canonicalize()
         .expect("Failed to canonicalize download path");
+
+    // Clean up old files
+    cleanup_old_files(&download_path, args.retention_days).await;
 
     // Enforce that download_path is under current working directory
     let relative_path = download_path
