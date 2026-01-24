@@ -95,6 +95,10 @@ async fn process_rss(xml: &str, state: &AppState) -> Result<String, Box<dyn std:
     let mut item_buffer: Vec<Event<'static>> = Vec::new();
     let mut item_failed = false;
 
+    let mut downloaded_count = 0u32;
+    let mut existing_count = 0u32;
+    let mut failed_count = 0u32;
+
     let url_regex = Regex::new(r#"url="([^"]*)""#)?;
 
     loop {
@@ -135,13 +139,23 @@ async fn process_rss(xml: &str, state: &AppState) -> Result<String, Box<dyn std:
 
                             // Download the torrent if it doesn't already exist
                             let torrent_path = state.download_path.join(format!("{guid}.torrent"));
-                            if !torrent_path.exists() {
-                                if let Err(err) =
-                                    download_file(&state.client, &decoded_url, &torrent_path).await
+                            if torrent_path.exists() {
+                                println!("Existing: {guid}");
+                                existing_count += 1;
+                            } else {
+                                match download_file(&state.client, &decoded_url, &torrent_path)
+                                    .await
                                 {
-                                    eprintln!("Failed to download {decoded_url}: {err}");
-                                    item_failed = true;
-                                    continue;
+                                    Ok(()) => {
+                                        println!("Downloaded: {guid}");
+                                        downloaded_count += 1;
+                                    }
+                                    Err(err) => {
+                                        eprintln!("Failed: {guid} - {err}");
+                                        failed_count += 1;
+                                        item_failed = true;
+                                        continue;
+                                    }
                                 }
                             }
 
@@ -192,11 +206,7 @@ async fn process_rss(xml: &str, state: &AppState) -> Result<String, Box<dyn std:
                     item_buffer.push(Event::End(e.into_owned()));
 
                     // Only write the item if download succeeded
-                    if item_failed {
-                        eprintln!(
-                            "Skipping item with guid {current_guid:?} due to download failure"
-                        );
-                    } else {
+                    if !item_failed {
                         for event in item_buffer.drain(..) {
                             writer.write_event(event)?;
                         }
@@ -231,6 +241,10 @@ async fn process_rss(xml: &str, state: &AppState) -> Result<String, Box<dyn std:
             Err(e) => return Err(format!("XML parse error: {e}").into()),
         }
     }
+
+    println!(
+        "Summary: {downloaded_count} downloaded, {existing_count} existing, {failed_count} failed"
+    );
 
     let result = writer.into_inner().into_inner();
     Ok(String::from_utf8(result)?)
