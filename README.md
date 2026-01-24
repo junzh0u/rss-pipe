@@ -10,7 +10,7 @@ A proxy server that downloads torrent enclosures from RSS feeds and rewrites the
 - Removes items from feed when download fails
 - Supports exclude patterns to filter out unwanted items (skips download entirely)
 - Serves downloaded files via built-in static file server
-- Automatically cleans up old files on startup
+- Automatically cleans up old files (at startup and daily)
 
 ## Installation
 

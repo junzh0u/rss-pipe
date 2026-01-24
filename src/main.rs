@@ -390,8 +390,20 @@ async fn main() {
         .canonicalize()
         .expect("Failed to canonicalize download path");
 
-    // Clean up old files
+    // Clean up old files at startup
     cleanup_old_files(&download_path, args.retention_days).await;
+
+    // Spawn background task for periodic cleanup (runs daily)
+    let cleanup_path = download_path.clone();
+    let cleanup_retention = args.retention_days;
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+        interval.tick().await; // Skip immediate first tick (already ran at startup)
+        loop {
+            interval.tick().await;
+            cleanup_old_files(&cleanup_path, cleanup_retention).await;
+        }
+    });
 
     // Enforce that download_path is under current working directory
     let relative_path = download_path
