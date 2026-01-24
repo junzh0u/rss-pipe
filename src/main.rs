@@ -6,6 +6,7 @@ use axum::{
     Router,
 };
 use clap::Parser;
+use moka::future::Cache;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, Writer};
 use regex::Regex;
@@ -14,6 +15,7 @@ use std::io::Cursor;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tower_http::services::ServeDir;
 
 #[derive(Parser)]
@@ -31,6 +33,9 @@ struct Args {
 
     #[arg(short, long, default_value_t = 30)]
     retention_days: u64,
+
+    #[arg(short, long, default_value_t = 10)]
+    cache_ttl_minutes: u64,
 }
 
 #[derive(Clone)]
@@ -38,6 +43,7 @@ struct AppState {
     download_path: PathBuf,
     base_url: String,
     client: reqwest::Client,
+    origin_cache: Cache<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -70,39 +76,58 @@ async fn pipe_handler(
         Vec::new()
     };
 
-    match state.client.get(&query.origin).send().await {
-        Ok(response) => {
-            let status = StatusCode::from_u16(response.status().as_u16())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    // Try to get origin content from cache, or fetch and cache it
+    let body = if let Some(cached) = state.origin_cache.get(&query.origin).await {
+        println!("Cache hit: {}", query.origin);
+        cached
+    } else {
+        match state.client.get(&query.origin).send().await {
+            Ok(response) => {
+                let status = StatusCode::from_u16(response.status().as_u16())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
-            if !status.is_success() {
-                return (status, "Origin returned error").into_response();
+                if !status.is_success() {
+                    return (status, "Origin returned error").into_response();
+                }
+
+                match response.text().await {
+                    Ok(body) => {
+                        println!("Cached: {}", query.origin);
+                        state
+                            .origin_cache
+                            .insert(query.origin.clone(), body.clone())
+                            .await;
+                        body
+                    }
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_GATEWAY,
+                            format!("Failed to read response body: {e}"),
+                        )
+                            .into_response();
+                    }
+                }
             }
-
-            match response.text().await {
-                Ok(body) => match process_rss(&body, &state, &exclude_patterns).await {
-                    Ok(modified_rss) => (
-                        StatusCode::OK,
-                        [("content-type", "application/rss+xml; charset=utf-8")],
-                        modified_rss,
-                    )
-                        .into_response(),
-                    Err(e) => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Failed to process RSS: {e}"),
-                    )
-                        .into_response(),
-                },
-                Err(e) => (
+            Err(e) => {
+                return (
                     StatusCode::BAD_GATEWAY,
-                    format!("Failed to read response body: {e}"),
+                    format!("Failed to fetch origin: {e}"),
                 )
-                    .into_response(),
+                    .into_response();
             }
         }
+    };
+
+    match process_rss(&body, &state, &exclude_patterns).await {
+        Ok(modified_rss) => (
+            StatusCode::OK,
+            [("content-type", "application/rss+xml; charset=utf-8")],
+            modified_rss,
+        )
+            .into_response(),
         Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            format!("Failed to fetch origin: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to process RSS: {e}"),
         )
             .into_response(),
     }
@@ -174,7 +199,6 @@ async fn process_rss(
                     });
 
                     if excluded {
-                        println!("Excluded: {}", current_guid.as_deref().unwrap_or("unknown"));
                         excluded_count += 1;
                         item_failed = true;
                         continue;
@@ -417,10 +441,16 @@ async fn main() {
         |url| format!("{}{serve_path}", url.trim_end_matches('/')),
     );
 
+    // Create cache with configured TTL
+    let origin_cache = Cache::builder()
+        .time_to_live(Duration::from_secs(args.cache_ttl_minutes * 60))
+        .build();
+
     let state = Arc::new(AppState {
         download_path,
         base_url,
         client: reqwest::Client::new(),
+        origin_cache,
     });
 
     let app = Router::new()
@@ -519,6 +549,12 @@ mod tests {
         reqwest::Client::builder().no_proxy().build().unwrap()
     }
 
+    fn test_cache() -> Cache<String, String> {
+        Cache::builder()
+            .time_to_live(Duration::from_secs(600))
+            .build()
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_failed_download_removes_item() {
         let success_url = start_ok_server().await;
@@ -529,6 +565,7 @@ mod tests {
             download_path: temp_dir.path().to_path_buf(),
             base_url: "http://localhost:4000/downloaded".to_string(),
             client: test_client(),
+            origin_cache: test_cache(),
         };
 
         let rss = make_rss(&[
@@ -568,6 +605,7 @@ mod tests {
             download_path: temp_dir.path().to_path_buf(),
             base_url: "http://localhost:4000/downloaded".to_string(),
             client: test_client(),
+            origin_cache: test_cache(),
         };
 
         let rss = make_rss(&[("existing-item", &format!("{fail_url}/existing.torrent"))]);
@@ -589,6 +627,7 @@ mod tests {
             download_path: temp_dir.path().to_path_buf(),
             base_url: "http://localhost:4000/downloaded".to_string(),
             client: test_client(),
+            origin_cache: test_cache(),
         };
 
         let rss = make_rss(&[
@@ -617,6 +656,7 @@ mod tests {
             download_path: temp_dir.path().to_path_buf(),
             base_url: "http://localhost:4000/downloaded".to_string(),
             client: test_client(),
+            origin_cache: test_cache(),
         };
 
         let rss = make_rss(&[
