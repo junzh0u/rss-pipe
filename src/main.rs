@@ -40,12 +40,33 @@ struct AppState {
 #[derive(Deserialize)]
 struct PipeQuery {
     origin: String,
+    exclude: Option<String>,
 }
 
 async fn pipe_handler(
     State(state): State<Arc<AppState>>,
     Query(query): Query<PipeQuery>,
 ) -> Response {
+    // Fetch exclude patterns if provided
+    let exclude_patterns: Vec<String> = if let Some(exclude_url) = &query.exclude {
+        match state.client.get(exclude_url).send().await {
+            Ok(response) if response.status().is_success() => response
+                .text()
+                .await
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| !line.is_empty())
+                .map(String::from)
+                .collect(),
+            _ => {
+                eprintln!("Failed to fetch exclude list from {exclude_url}");
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
     match state.client.get(&query.origin).send().await {
         Ok(response) => {
             let status = StatusCode::from_u16(response.status().as_u16())
@@ -56,7 +77,7 @@ async fn pipe_handler(
             }
 
             match response.text().await {
-                Ok(body) => match process_rss(&body, &state).await {
+                Ok(body) => match process_rss(&body, &state, &exclude_patterns).await {
                     Ok(modified_rss) => (
                         StatusCode::OK,
                         [("content-type", "application/rss+xml; charset=utf-8")],
@@ -85,12 +106,18 @@ async fn pipe_handler(
 }
 
 #[allow(clippy::too_many_lines)]
-async fn process_rss(xml: &str, state: &AppState) -> Result<String, Box<dyn std::error::Error>> {
+async fn process_rss(
+    xml: &str,
+    state: &AppState,
+    exclude_patterns: &[String],
+) -> Result<String, Box<dyn std::error::Error>> {
     let mut reader = Reader::from_str(xml);
     let mut writer = Writer::new(Cursor::new(Vec::new()));
 
     let mut current_guid: Option<String> = None;
+    let mut current_title: Option<String> = None;
     let mut in_guid = false;
+    let mut in_title = false;
     let mut in_item = false;
     let mut item_buffer: Vec<Event<'static>> = Vec::new();
     let mut item_failed = false;
@@ -98,6 +125,7 @@ async fn process_rss(xml: &str, state: &AppState) -> Result<String, Box<dyn std:
     let mut downloaded_count = 0u32;
     let mut existing_count = 0u32;
     let mut failed_count = 0u32;
+    let mut excluded_count = 0u32;
 
     let url_regex = Regex::new(r#"url="([^"]*)""#)?;
 
@@ -113,10 +141,15 @@ async fn process_rss(xml: &str, state: &AppState) -> Result<String, Box<dyn std:
                     item_buffer.clear();
                     item_failed = false;
                     current_guid = None;
+                    current_title = None;
                 }
 
                 if name_str == "guid" {
                     in_guid = true;
+                }
+
+                if name_str == "title" && in_item {
+                    in_title = true;
                 }
 
                 if in_item {
@@ -202,11 +235,24 @@ async fn process_rss(xml: &str, state: &AppState) -> Result<String, Box<dyn std:
                     in_guid = false;
                 }
 
+                if name_str == "title" {
+                    in_title = false;
+                }
+
                 if name_str == "item" {
                     item_buffer.push(Event::End(e.into_owned()));
 
-                    // Only write the item if download succeeded
-                    if !item_failed {
+                    // Check if title matches any exclude pattern
+                    let excluded = current_title.as_ref().is_some_and(|title| {
+                        exclude_patterns
+                            .iter()
+                            .any(|pattern| title.contains(pattern))
+                    });
+
+                    if excluded {
+                        println!("Excluded: {}", current_guid.as_deref().unwrap_or("unknown"));
+                        excluded_count += 1;
+                    } else if !item_failed {
                         for event in item_buffer.drain(..) {
                             writer.write_event(event)?;
                         }
@@ -214,6 +260,7 @@ async fn process_rss(xml: &str, state: &AppState) -> Result<String, Box<dyn std:
 
                     in_item = false;
                     current_guid = None;
+                    current_title = None;
                 } else if in_item {
                     item_buffer.push(Event::End(e.into_owned()));
                 } else {
@@ -224,6 +271,10 @@ async fn process_rss(xml: &str, state: &AppState) -> Result<String, Box<dyn std:
                 if in_guid {
                     let text = e.unescape()?;
                     current_guid = Some(text.to_string());
+                }
+                if in_title {
+                    let text = e.unescape()?;
+                    current_title = Some(text.to_string());
                 }
                 if in_item {
                     item_buffer.push(Event::Text(e.into_owned()));
@@ -243,7 +294,7 @@ async fn process_rss(xml: &str, state: &AppState) -> Result<String, Box<dyn std:
     }
 
     println!(
-        "Summary: {downloaded_count} downloaded, {existing_count} existing, {failed_count} failed"
+        "Summary: {downloaded_count} downloaded, {existing_count} existing, {failed_count} failed, {excluded_count} excluded"
     );
 
     let result = writer.into_inner().into_inner();
@@ -399,7 +450,7 @@ mod tests {
             ("item-fail", &format!("{fail_url}/fail.torrent")),
         ]);
 
-        let result = process_rss(&rss, &state).await.unwrap();
+        let result = process_rss(&rss, &state, &[]).await.unwrap();
 
         // Successful item should be present
         assert!(
@@ -435,7 +486,7 @@ mod tests {
 
         let rss = make_rss(&[("existing-item", &format!("{fail_url}/existing.torrent"))]);
 
-        let result = process_rss(&rss, &state).await.unwrap();
+        let result = process_rss(&rss, &state, &[]).await.unwrap();
 
         // Item should be present since file already existed
         assert!(result.contains("existing-item"));
@@ -459,7 +510,7 @@ mod tests {
             ("fail-item-2", &format!("{fail_url2}/fail2.torrent")),
         ]);
 
-        let result = process_rss(&rss, &state).await.unwrap();
+        let result = process_rss(&rss, &state, &[]).await.unwrap();
 
         // No items should be present
         assert!(!result.contains("fail-item-1"));
