@@ -9,8 +9,10 @@ A proxy server that downloads torrent enclosures from RSS feeds and rewrites the
 - Skips already downloaded torrents (uses GUID as filename)
 - Removes items from feed when download fails
 - Supports exclude patterns to filter out unwanted items (skips download entirely)
+- Caches origin feeds to reduce upstream requests
 - Serves downloaded files via built-in static file server
 - Automatically cleans up old files (at startup and daily)
+- Web UI for generating pipe URLs
 
 ## Installation
 
@@ -32,6 +34,7 @@ rss-pipe [OPTIONS]
 | `-d, --download-path <PATH>` | `./downloaded/` | Directory to store downloaded torrents (must be under current working directory) |
 | `-b, --base-url <URL>` | `http://localhost:<PORT>/<PATH>` | Base URL for rewritten enclosure links |
 | `-r, --retention-days <DAYS>` | `30` | Delete downloaded files older than this many days on startup |
+| `-c, --cache-ttl-minutes <MINS>` | `10` | Cache origin RSS feeds for this many minutes |
 
 ### Examples
 
@@ -53,6 +56,10 @@ rss-pipe -r 7
 ```
 
 ## API
+
+### GET /
+
+Web UI with a form to generate pipe URLs. Enter the origin RSS URL and optional exclude URL, then click "Pipe" to navigate to the processed feed.
 
 ### GET /pipe
 
@@ -89,6 +96,26 @@ Serves downloaded torrent files as static content.
 5. Rewrites the enclosure URL to `<base-url>/<guid>.torrent`
 6. Removes items where download failed
 7. Returns the modified RSS feed
+
+## Docker
+
+```bash
+# Copy and configure environment
+cp env.example .env
+# Edit .env with your settings
+
+# Run with docker compose
+docker compose up -d
+```
+
+Configuration options in `.env`:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `4000` | Port to listen on |
+| `BASE_URL` | (none) | Base URL for external access |
+| `RETENTION_DAYS` | `30` | Days to keep downloaded files |
+| `CACHE_TTL_MINUTES` | `10` | Minutes to cache origin feeds |
 
 ## Development
 
