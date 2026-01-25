@@ -1,7 +1,7 @@
 use axum::{
     extract::{Query, State},
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::{Html, IntoResponse, Response},
     routing::get,
     Router,
 };
@@ -50,6 +50,50 @@ struct AppState {
 struct PipeQuery {
     origin: String,
     exclude: Option<String>,
+}
+
+async fn index_handler() -> Html<&'static str> {
+    Html(
+        r#"<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>RSS Pipe</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 600px; margin: 40px auto; padding: 0 20px; }
+        h1 { margin-bottom: 24px; }
+        label { display: block; margin-bottom: 4px; font-weight: 500; }
+        input { width: 100%; padding: 8px; margin-bottom: 16px; box-sizing: border-box; }
+        button { padding: 10px 20px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <h1>RSS Pipe</h1>
+    <form id="pipeForm">
+        <label for="origin">Origin RSS URL</label>
+        <input type="url" id="origin" name="origin" required placeholder="https://example.com/feed.xml">
+
+        <label for="exclude">Exclude URL (optional)</label>
+        <input type="url" id="exclude" name="exclude" placeholder="https://example.com/exclude.txt">
+
+        <button type="submit">Pipe</button>
+    </form>
+    <script>
+        document.getElementById('pipeForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const origin = document.getElementById('origin').value;
+            const exclude = document.getElementById('exclude').value;
+            let url = '/pipe?origin=' + encodeURIComponent(origin);
+            if (exclude) {
+                url += '&exclude=' + encodeURIComponent(exclude);
+            }
+            window.location.href = url;
+        });
+    </script>
+</body>
+</html>"#,
+    )
 }
 
 async fn pipe_handler(
@@ -453,6 +497,7 @@ async fn main() {
     });
 
     let app = Router::new()
+        .route("/", get(index_handler))
         .route("/pipe", get(pipe_handler))
         .nest_service(&serve_path, ServeDir::new(&state.download_path))
         .with_state(state);
