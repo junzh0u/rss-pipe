@@ -75,17 +75,17 @@ Proxies an RSS feed, downloading enclosures and rewriting URLs.
 **Example:**
 
 ```bash
-curl "http://localhost:4000/pipe?origin=https://example.com/feed.rss"
+curl 'http://localhost:4000/pipe?origin=https%3A%2F%2Fexample.com%2Ffeed.rss'
 
 # With exclude patterns
-curl "http://localhost:4000/pipe?origin=https://example.com/feed.rss&exclude=https://example.com/excludes.txt"
+curl 'http://localhost:4000/pipe?origin=https%3A%2F%2Fexample.com%2Ffeed.rss&exclude=https%3A%2F%2Fexample.com%2Fexcludes.txt'
 ```
 
 Items whose title contains any exclude pattern will be filtered out without attempting download.
 
-### GET /<download-path>/*
+### GET /downloaded/*
 
-Serves downloaded torrent files as static content.
+Serves downloaded torrent files as static content. The path matches the `--download-path` option (default: `downloaded`).
 
 ## How It Works
 
@@ -93,7 +93,7 @@ Serves downloaded torrent files as static content.
 2. Parses each `<item>` element looking for `<enclosure>` tags
 3. Skips items whose title matches an exclude pattern (no download attempted)
 4. Downloads the enclosure URL to `<download-path>/<guid>.torrent`
-5. Rewrites the enclosure URL to `<base-url>/<guid>.torrent`
+5. Rewrites the enclosure URL to point to the local file
 6. Removes items where download failed
 7. Returns the modified RSS feed
 
