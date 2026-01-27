@@ -441,7 +441,14 @@ async fn process_rss(
             Ok(Event::End(e)) => {
                 let name = e.name();
                 match std::str::from_utf8(name.as_ref())? {
-                    "guid" | "title" => item.parsing = ParsingField::None,
+                    "guid" | "title" => {
+                        item.parsing = ParsingField::None;
+                        if item.active {
+                            item.buffer.push(Event::End(e.into_owned()));
+                        } else {
+                            writer.write_event(Event::End(e))?;
+                        }
+                    }
                     "item" => {
                         item.buffer.push(Event::End(e.into_owned()));
                         item.finish_item(&mut writer)?;
