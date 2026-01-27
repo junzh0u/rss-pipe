@@ -26,3 +26,7 @@ The entire application is in `src/main.rs`:
 - CLI argument parsing via clap (port configuration)
 - axum router with one route
 - `pipe_handler` uses reqwest to fetch the origin URL and passes through the response
+
+## Guidelines
+
+- Update README.md on non-trivial changes (new features, API changes, new options)

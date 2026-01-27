@@ -83,6 +83,14 @@ curl 'http://localhost:4000/pipe?origin=https%3A%2F%2Fexample.com%2Ffeed.rss&exc
 
 Items whose title contains any exclude pattern will be filtered out without attempting download.
 
+### GET /cache
+
+Displays a list of cached origin feeds with their remaining TTL.
+
+Shows:
+- All currently cached origin URLs (clickable links to `/pipe`)
+- Time remaining before each entry expires
+
 ### GET /downloaded/*
 
 Serves downloaded torrent files as static content. The path matches the `--download-path` option (default: `downloaded`).
