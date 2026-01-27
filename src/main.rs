@@ -342,6 +342,14 @@ async fn process_enclosure(
     } else {
         match download_file(&app_state.client, &decoded_url, &torrent_path).await {
             Ok(()) => {
+                if let Ok(metadata) = std::fs::metadata(&torrent_path) {
+                    if metadata.len() < 1024 {
+                        let _ = std::fs::remove_file(&torrent_path);
+                        eprintln!("Deleted (too small <1KB): {guid}");
+                        counters.failed += 1;
+                        return Ok(EnclosureResult::Failed);
+                    }
+                }
                 println!("Downloaded: {guid}");
                 counters.downloaded += 1;
             }
@@ -638,8 +646,14 @@ mod tests {
                     tokio::spawn(async move {
                         let mut buf = [0u8; 4096];
                         let _ = socket.read(&mut buf).await;
-                        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\ntorrent data";
-                        let _ = socket.write_all(response).await;
+                        // Return >= 1KB to pass the size check
+                        let body = vec![b'X'; 1024];
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = socket.write_all(header.as_bytes()).await;
+                        let _ = socket.write_all(&body).await;
                         let _ = socket.flush().await;
                     });
                 }
