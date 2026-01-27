@@ -177,28 +177,143 @@ async fn pipe_handler(
     }
 }
 
-#[allow(clippy::too_many_lines)]
+#[derive(Default)]
+struct ProcessStats {
+    downloaded: u32,
+    existing: u32,
+    failed: u32,
+    excluded: u32,
+}
+
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum ParsingField {
+    #[default]
+    None,
+    Guid,
+    Title,
+}
+
+struct ItemContext {
+    guid: Option<String>,
+    title: Option<String>,
+    buffer: Vec<Event<'static>>,
+    parsing: ParsingField,
+    active: bool,
+    failed: bool,
+}
+
+impl ItemContext {
+    fn new() -> Self {
+        Self {
+            guid: None,
+            title: None,
+            buffer: Vec::new(),
+            parsing: ParsingField::None,
+            active: false,
+            failed: false,
+        }
+    }
+
+    fn start_item(&mut self) {
+        self.active = true;
+        self.buffer.clear();
+        self.failed = false;
+        self.guid = None;
+        self.title = None;
+    }
+
+    fn finish_item<W: std::io::Write>(
+        &mut self,
+        writer: &mut Writer<W>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.failed {
+            for event in self.buffer.drain(..) {
+                writer.write_event(event)?;
+            }
+        }
+        self.active = false;
+        self.guid = None;
+        self.title = None;
+        Ok(())
+    }
+}
+
+enum EnclosureResult {
+    Success(Event<'static>),
+    Excluded,
+    Failed,
+}
+
+async fn process_enclosure(
+    e: &BytesStart<'_>,
+    guid: &str,
+    title: Option<&str>,
+    app_state: &AppState,
+    exclude_patterns: &[String],
+    url_regex: &Regex,
+    counters: &mut ProcessStats,
+) -> Result<EnclosureResult, Box<dyn std::error::Error>> {
+    let dominated =
+        title.is_some_and(|t| exclude_patterns.iter().any(|pattern| t.contains(pattern)));
+
+    if dominated {
+        counters.excluded += 1;
+        return Ok(EnclosureResult::Excluded);
+    }
+
+    let elem_str = String::from_utf8(e.to_vec())?;
+    let Some(caps) = url_regex.captures(&elem_str) else {
+        return Ok(EnclosureResult::Failed);
+    };
+
+    let decoded_url = quick_xml::escape::unescape(&caps[1])?;
+    let torrent_path = app_state.download_path.join(format!("{guid}.torrent"));
+
+    if torrent_path.exists() {
+        counters.existing += 1;
+    } else {
+        match download_file(&app_state.client, &decoded_url, &torrent_path).await {
+            Ok(()) => {
+                println!("Downloaded: {guid}");
+                counters.downloaded += 1;
+            }
+            Err(err) => {
+                eprintln!("Failed: {guid} - {err}");
+                counters.failed += 1;
+                return Ok(EnclosureResult::Failed);
+            }
+        }
+    }
+
+    let new_url = format!(
+        "{}/{guid}.torrent",
+        app_state.base_url.trim_end_matches('/')
+    );
+    let mut new_elem = BytesStart::new("enclosure");
+
+    for attr in e.attributes().flatten() {
+        let key = std::str::from_utf8(attr.key.as_ref())?;
+        if key == "url" {
+            new_elem.push_attribute(("url", new_url.as_str()));
+        } else {
+            new_elem.push_attribute(attr);
+        }
+    }
+
+    Ok(EnclosureResult::Success(Event::Empty(
+        new_elem.into_owned(),
+    )))
+}
+
 async fn process_rss(
     xml: &str,
-    state: &AppState,
+    app_state: &AppState,
     exclude_patterns: &[String],
 ) -> Result<String, Box<dyn std::error::Error>> {
     let mut reader = Reader::from_str(xml);
     let mut writer = Writer::new(Cursor::new(Vec::new()));
-
-    let mut current_guid: Option<String> = None;
-    let mut current_title: Option<String> = None;
-    let mut in_guid = false;
-    let mut in_title = false;
-    let mut in_item = false;
-    let mut item_buffer: Vec<Event<'static>> = Vec::new();
-    let mut item_failed = false;
-
-    let mut downloaded_count = 0u32;
-    let mut existing_count = 0u32;
-    let mut failed_count = 0u32;
-    let mut excluded_count = 0u32;
-
+    let mut item = ItemContext::new();
+    let mut counters = ProcessStats::default();
     let url_regex = Regex::new(r#"url="([^"]*)""#)?;
 
     loop {
@@ -206,160 +321,74 @@ async fn process_rss(
             Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
                 let name = e.name();
-                let name_str = std::str::from_utf8(name.as_ref())?;
-
-                if name_str == "item" {
-                    in_item = true;
-                    item_buffer.clear();
-                    item_failed = false;
-                    current_guid = None;
-                    current_title = None;
+                match std::str::from_utf8(name.as_ref())? {
+                    "item" => item.start_item(),
+                    "guid" => item.parsing = ParsingField::Guid,
+                    "title" if item.active => item.parsing = ParsingField::Title,
+                    _ => {}
                 }
-
-                if name_str == "guid" {
-                    in_guid = true;
-                }
-
-                if name_str == "title" && in_item {
-                    in_title = true;
-                }
-
-                if in_item {
-                    item_buffer.push(Event::Start(e.into_owned()));
+                if item.active {
+                    item.buffer.push(Event::Start(e.into_owned()));
                 } else {
                     writer.write_event(Event::Start(e.clone()))?;
                 }
             }
             Ok(Event::Empty(e)) => {
                 let name = e.name();
-                let name_str = std::str::from_utf8(name.as_ref())?;
-
-                if name_str == "enclosure" && in_item {
-                    // Check if title matches any exclude pattern before downloading
-                    let excluded = current_title.as_ref().is_some_and(|title| {
-                        exclude_patterns
-                            .iter()
-                            .any(|pattern| title.contains(pattern))
-                    });
-
-                    if excluded {
-                        excluded_count += 1;
-                        item_failed = true;
-                        continue;
-                    }
-
-                    if let Some(ref guid) = current_guid {
-                        let elem_str = String::from_utf8(e.to_vec())?;
-
-                        if let Some(caps) = url_regex.captures(&elem_str) {
-                            let original_url = &caps[1];
-                            let decoded_url = quick_xml::escape::unescape(original_url)?;
-
-                            // Download the torrent if it doesn't already exist
-                            let torrent_path = state.download_path.join(format!("{guid}.torrent"));
-                            if torrent_path.exists() {
-                                existing_count += 1;
-                            } else {
-                                match download_file(&state.client, &decoded_url, &torrent_path)
-                                    .await
-                                {
-                                    Ok(()) => {
-                                        println!("Downloaded: {guid}");
-                                        downloaded_count += 1;
-                                    }
-                                    Err(err) => {
-                                        eprintln!("Failed: {guid} - {err}");
-                                        failed_count += 1;
-                                        item_failed = true;
-                                        continue;
-                                    }
-                                }
-                            }
-
-                            // Build new enclosure with replaced URL
-                            let new_url = format!(
-                                "{}/{}.torrent",
-                                state.base_url.trim_end_matches('/'),
-                                guid
-                            );
-                            let mut new_elem = BytesStart::new("enclosure");
-
-                            for attr in e.attributes().flatten() {
-                                let key = std::str::from_utf8(attr.key.as_ref())?;
-                                if key == "url" {
-                                    new_elem.push_attribute(("url", new_url.as_str()));
-                                } else {
-                                    new_elem.push_attribute(attr);
-                                }
-                            }
-
-                            item_buffer.push(Event::Empty(new_elem.into_owned()));
-                        } else {
-                            // URL regex didn't match - mark item as failed
-                            item_failed = true;
+                if std::str::from_utf8(name.as_ref())? == "enclosure" && item.active {
+                    if let Some(ref guid) = item.guid {
+                        match process_enclosure(
+                            &e,
+                            guid,
+                            item.title.as_deref(),
+                            app_state,
+                            exclude_patterns,
+                            &url_regex,
+                            &mut counters,
+                        )
+                        .await?
+                        {
+                            EnclosureResult::Success(event) => item.buffer.push(event),
+                            _ => item.failed = true,
                         }
                     } else {
-                        // No guid available - mark item as failed
-                        item_failed = true;
+                        item.failed = true;
                     }
                     continue;
                 }
-
-                if in_item {
-                    item_buffer.push(Event::Empty(e.into_owned()));
+                if item.active {
+                    item.buffer.push(Event::Empty(e.into_owned()));
                 } else {
                     writer.write_event(Event::Empty(e))?;
                 }
             }
             Ok(Event::End(e)) => {
                 let name = e.name();
-                let name_str = std::str::from_utf8(name.as_ref())?;
-
-                if name_str == "guid" {
-                    in_guid = false;
-                }
-
-                if name_str == "title" {
-                    in_title = false;
-                }
-
-                if name_str == "item" {
-                    item_buffer.push(Event::End(e.into_owned()));
-
-                    // Only write the item if not failed/excluded
-                    if !item_failed {
-                        for event in item_buffer.drain(..) {
-                            writer.write_event(event)?;
-                        }
+                match std::str::from_utf8(name.as_ref())? {
+                    "guid" | "title" => item.parsing = ParsingField::None,
+                    "item" => {
+                        item.buffer.push(Event::End(e.into_owned()));
+                        item.finish_item(&mut writer)?;
                     }
-
-                    in_item = false;
-                    current_guid = None;
-                    current_title = None;
-                } else if in_item {
-                    item_buffer.push(Event::End(e.into_owned()));
-                } else {
-                    writer.write_event(Event::End(e))?;
+                    _ if item.active => item.buffer.push(Event::End(e.into_owned())),
+                    _ => writer.write_event(Event::End(e))?,
                 }
             }
             Ok(Event::Text(e)) => {
-                if in_guid {
-                    let text = e.unescape()?;
-                    current_guid = Some(text.to_string());
+                match item.parsing {
+                    ParsingField::Guid => item.guid = Some(e.unescape()?.to_string()),
+                    ParsingField::Title => item.title = Some(e.unescape()?.to_string()),
+                    ParsingField::None => {}
                 }
-                if in_title {
-                    let text = e.unescape()?;
-                    current_title = Some(text.to_string());
-                }
-                if in_item {
-                    item_buffer.push(Event::Text(e.into_owned()));
+                if item.active {
+                    item.buffer.push(Event::Text(e.into_owned()));
                 } else {
                     writer.write_event(Event::Text(e))?;
                 }
             }
             Ok(e) => {
-                if in_item {
-                    item_buffer.push(e.into_owned());
+                if item.active {
+                    item.buffer.push(e.into_owned());
                 } else {
                     writer.write_event(e)?;
                 }
@@ -369,11 +398,10 @@ async fn process_rss(
     }
 
     println!(
-        "Summary: {downloaded_count} downloaded, {existing_count} existing, {failed_count} failed, {excluded_count} excluded"
+        "Summary: {} downloaded, {} existing, {} failed, {} excluded",
+        counters.downloaded, counters.existing, counters.failed, counters.excluded
     );
-
-    let result = writer.into_inner().into_inner();
-    Ok(String::from_utf8(result)?)
+    Ok(String::from_utf8(writer.into_inner().into_inner())?)
 }
 
 async fn download_file(
