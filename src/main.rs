@@ -15,7 +15,7 @@ use std::io::Cursor;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tower_http::services::ServeDir;
 
 #[derive(Parser)]
@@ -39,11 +39,17 @@ struct Args {
 }
 
 #[derive(Clone)]
+struct CachedEntry {
+    content: String,
+    cached_at: Instant,
+}
+
+#[derive(Clone)]
 struct AppState {
     download_path: PathBuf,
     base_url: String,
     client: reqwest::Client,
-    origin_cache: Cache<String, String>,
+    origin_cache: Cache<String, CachedEntry>,
 }
 
 #[derive(Deserialize)]
@@ -96,6 +102,67 @@ async fn index_handler() -> Html<&'static str> {
     )
 }
 
+async fn cache_handler(State(state): State<Arc<AppState>>) -> Html<String> {
+    let ttl_duration = state.origin_cache.policy().time_to_live();
+    let ttl_str = ttl_duration.map_or("unknown".to_string(), |d| {
+        format!("{} min", d.as_secs() / 60)
+    });
+
+    let now = Instant::now();
+    let entries: Vec<String> = state
+        .origin_cache
+        .iter()
+        .map(|(k, v)| {
+            let origin = &*k;
+            let pipe_url = format!("/pipe?origin={}", urlencoding::encode(origin));
+            let expires_in = ttl_duration
+                .and_then(|ttl| ttl.checked_sub(now.duration_since(v.cached_at)))
+                .map_or("unknown".to_string(), |remaining| {
+                    let secs = remaining.as_secs();
+                    let mins = secs / 60;
+                    let secs = secs % 60;
+                    format!("{mins} min {secs} sec")
+                });
+            format!(r#"<tr><td><a href="{pipe_url}">{origin}</a></td><td>{expires_in}</td></tr>"#)
+        })
+        .collect();
+
+    let rows = if entries.is_empty() {
+        "<tr><td colspan=\"2\">No cached entries</td></tr>".to_string()
+    } else {
+        entries.join("\n")
+    };
+
+    Html(format!(
+        r#"<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>RSS Pipe - Cache</title>
+    <style>
+        body {{ font-family: system-ui, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; }}
+        h1 {{ margin-bottom: 8px; }}
+        p {{ color: #666; margin-bottom: 24px; }}
+        table {{ width: 100%; border-collapse: collapse; }}
+        th, td {{ padding: 8px; border-bottom: 1px solid #eee; text-align: left; }}
+        td:first-child {{ word-break: break-all; }}
+        td:last-child {{ white-space: nowrap; }}
+        a {{ color: #0066cc; }}
+    </style>
+</head>
+<body>
+    <h1>Cached Origins</h1>
+    <p>TTL: {ttl_str}</p>
+    <table>
+        <tr><th>Origin</th><th>Expires In</th></tr>
+        {rows}
+    </table>
+</body>
+</html>"#
+    ))
+}
+
 async fn pipe_handler(
     State(state): State<Arc<AppState>>,
     Query(query): Query<PipeQuery>,
@@ -123,7 +190,7 @@ async fn pipe_handler(
     // Try to get origin content from cache, or fetch and cache it
     let body = if let Some(cached) = state.origin_cache.get(&query.origin).await {
         println!("From cache: {}", query.origin);
-        cached
+        cached.content.clone()
     } else {
         match state.client.get(&query.origin).send().await {
             Ok(response) => {
@@ -137,10 +204,11 @@ async fn pipe_handler(
                 match response.text().await {
                     Ok(body) => {
                         println!("Fetched: {}", query.origin);
-                        state
-                            .origin_cache
-                            .insert(query.origin.clone(), body.clone())
-                            .await;
+                        let entry = CachedEntry {
+                            content: body.clone(),
+                            cached_at: Instant::now(),
+                        };
+                        state.origin_cache.insert(query.origin.clone(), entry).await;
                         body
                     }
                     Err(e) => {
@@ -527,6 +595,7 @@ async fn main() {
     let app = Router::new()
         .route("/", get(index_handler))
         .route("/pipe", get(pipe_handler))
+        .route("/cache", get(cache_handler))
         .nest_service(&serve_path, ServeDir::new(&state.download_path))
         .with_state(state);
 
@@ -621,7 +690,7 @@ mod tests {
         reqwest::Client::builder().no_proxy().build().unwrap()
     }
 
-    fn test_cache() -> Cache<String, String> {
+    fn test_cache() -> Cache<String, CachedEntry> {
         Cache::builder()
             .time_to_live(Duration::from_secs(600))
             .build()
