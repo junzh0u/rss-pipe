@@ -575,7 +575,7 @@ async fn main() {
     let cleanup_path = download_path.clone();
     let cleanup_retention = args.retention_days;
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+        let mut interval = tokio::time::interval(std::time::Duration::from_hours(24));
         interval.tick().await; // Skip immediate first tick (already ran at startup)
         loop {
             interval.tick().await;
