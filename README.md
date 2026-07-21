@@ -112,8 +112,12 @@ Serves downloaded torrent files as static content. The path matches the `--downl
 cp env.example .env
 # Edit .env with your settings
 
-# Run with docker compose
+# Run with docker compose (pulls ghcr.io/junzh0u/rss-pipe:latest,
+# built by CI on every push to main)
 docker compose up -d
+
+# Deploy/update on a remote host (syncs compose file, pulls, restarts)
+just deploy [host] [dir]
 ```
 
 Configuration options in `.env`:

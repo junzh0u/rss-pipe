@@ -1,6 +1,6 @@
 services:
   rss-pipe:
-    build: .
+    image: ghcr.io/junzh0u/rss-pipe:latest
     ports:
       - "${PORT:-4000}:${PORT:-4000}"
     volumes:
