@@ -618,7 +618,37 @@ async fn main() {
     println!("Listening on http://{addr}");
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .unwrap();
+}
+
+/// Resolves on SIGINT (Ctrl-C) or SIGTERM. Needed because as PID 1 in a
+/// container the process has no default SIGTERM handler, so `docker stop`
+/// would otherwise hang until the kill timeout.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl-C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => {},
+        () = terminate => {},
+    }
+    println!("Shutdown signal received, stopping");
 }
 
 #[cfg(test)]

@@ -11,7 +11,7 @@ quick-xml = "0.37"
 regex = "1"
 reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time", "signal"] }
 tower-http = { version = "0.6", features = ["fs"] }
 urlencoding = "2"
 
