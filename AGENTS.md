@@ -18,14 +18,18 @@ make install             # Install binary locally
 
 ## Architecture
 
-This is a simple HTTP proxy server built with axum. It has a single endpoint:
-
-- `GET /pipe?origin={URL}` - Fetches the given URL and returns the response unchanged (status, headers, body)
+An axum server that proxies RSS feeds, downloads their `.torrent` enclosures, and rewrites the feed to serve those files locally. See README.md for the user-facing API and options.
 
 The entire application is in `src/main.rs`:
-- CLI argument parsing via clap (port configuration)
-- axum router with one route
-- `pipe_handler` uses reqwest to fetch the origin URL and passes through the response
+
+- `Args` (clap): port, download path, base URL, retention days, cache TTL
+- Routes: `/` (`index_handler`, web form), `/pipe` (`pipe_handler`), `/cache` (`cache_handler`, lists cached origins), and a `ServeDir` for the download directory, mounted at its path relative to the working directory
+- `pipe_handler` fetches the optional exclude list, then the origin feed through a moka cache (`origin_cache`), and passes it to `process_rss`
+- `process_rss` streams the XML with quick-xml; `process_enclosure` skips excluded titles, downloads to `<download-path>/<guid>.torrent` unless already present, and rewrites the enclosure URL. Items whose download fails are dropped
+- `cleanup_old_files` deletes downloads past the retention period at startup and daily from a background task
+- `shutdown_signal` handles SIGTERM and Ctrl-C for graceful shutdown; the binary runs as PID 1 in Docker, where SIGTERM has no default handler
+
+Tests live in the `tests` module at the bottom of `main.rs` and spin up throwaway TCP servers to stand in for origin hosts.
 
 ## Guidelines
 

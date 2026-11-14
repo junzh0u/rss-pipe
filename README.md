@@ -13,6 +13,7 @@ A proxy server that downloads torrent enclosures from RSS feeds and rewrites the
 - Serves downloaded files via built-in static file server
 - Automatically cleans up old files (at startup and daily)
 - Web UI for generating pipe URLs
+- Shuts down gracefully on SIGTERM / Ctrl-C (container-friendly)
 
 ## Installation
 
@@ -33,7 +34,7 @@ rss-pipe [OPTIONS]
 | `-p, --port <PORT>` | `4000` | Port to listen on |
 | `-d, --download-path <PATH>` | `./downloaded/` | Directory to store downloaded torrents (must be under current working directory) |
 | `-b, --base-url <URL>` | `http://localhost:<PORT>/<PATH>` | Base URL for rewritten enclosure links |
-| `-r, --retention-days <DAYS>` | `30` | Delete downloaded files older than this many days on startup |
+| `-r, --retention-days <DAYS>` | `30` | Delete downloaded files older than this many days (checked at startup and daily) |
 | `-c, --cache-ttl-minutes <MINS>` | `10` | Cache origin RSS feeds for this many minutes |
 
 ### Examples
